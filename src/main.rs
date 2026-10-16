@@ -141,9 +141,26 @@ struct Worker {
 #[derive(PartialEq, Clone, Copy)]
 enum Status {
     Idle,
+    /// Empty box: the dropdown teaches Everything's search syntax.
+    Tips,
     Ready,
     NotRunning,
 }
+
+/// Shown when the box is empty. Choosing one types the example in, so the
+/// search runs and the user sees what it does.
+const TIPS: &[(&str, &str)] = &[
+    ("report pdf", "Words in any order: names containing both \"report\" and \"pdf\""),
+    ("*.mp4", "Wildcards: * is any text, ? is one character"),
+    ("ext:pdf;docx invoice", "Only these file types (separate with ;)"),
+    ("dm:today", "Modified today. Also dm:yesterday, dm:thisweek, dm:thismonth"),
+    ("size:>500mb", "Bigger than 500 MB. Also size:<10kb, size:huge"),
+    ("downloads\\ zip", "A term with \\ searches the folder path: zips in any Downloads folder"),
+    ("folder:project", "Only folders. Use file: for only files"),
+    ("budget | invoice", "Either word (OR)"),
+    ("photo !thumb", "Exclude a word (NOT) with !"),
+    ("\"meeting notes\"", "Quotes: the exact phrase, spaces included"),
+];
 
 struct Fonts {
     edit: HFONT,
@@ -364,7 +381,12 @@ unsafe fn run(opts: Options) {
     if let Some(job) = &a.render {
         // Windows stay hidden; the query goes through the real IPC path.
         SetTimer(a.box_hwnd, RENDER_TIMEOUT_TIMER, 4000, None);
-        SetWindowTextW(a.edit, wide(&job.query).as_ptr());
+        if job.query.is_empty() {
+            show_tips();
+            render_and_quit();
+        } else {
+            SetWindowTextW(a.edit, wide(&job.query).as_ptr());
+        }
     } else if a.pinned {
         register_hotkey(&opts.hotkey);
         SetWinEventHook(
@@ -577,9 +599,42 @@ unsafe fn place_windows() {
     }
 }
 
-fn list_rows() -> i32 {
+/// Rows the dropdown can select: tips when the box is empty, else results.
+fn row_count() -> i32 {
     let a = app();
-    (a.items.len() as i32).clamp(1, VISIBLE_ROWS)
+    if a.status == Status::Tips {
+        TIPS.len() as i32
+    } else {
+        a.items.len() as i32
+    }
+}
+
+fn list_rows() -> i32 {
+    row_count().clamp(1, VISIBLE_ROWS)
+}
+
+/// Switches the dropdown to the tips list.
+unsafe fn show_tips() {
+    let a = app();
+    a.items.clear();
+    a.total = 0;
+    a.status = Status::Tips;
+    a.sel = 0;
+    a.scroll = 0;
+    a.hover = -1;
+    a.latest_id = a.latest_id.wrapping_add(1).max(1); // drop in-flight replies
+    if a.render.is_some() || GetForegroundWindow() == a.box_hwnd {
+        show_list(true);
+    }
+}
+
+/// Types a tip's example into the box, which runs the search.
+unsafe fn apply_tip(index: i32) {
+    let a = app();
+    let Some((example, _)) = TIPS.get(index as usize) else { return };
+    SetWindowTextW(a.edit, wide(example).as_ptr());
+    let end = example.encode_utf16().count();
+    SendMessageW(a.edit, EM_SETSEL, end, end as isize);
 }
 
 /// Sizes the dropdown for the current results and opens it away from the
@@ -622,14 +677,9 @@ fn edit_text() -> String {
 }
 
 unsafe fn on_text_changed() {
-    let a = app();
     let text = edit_text();
     if text.trim().is_empty() {
-        a.items.clear();
-        a.total = 0;
-        a.status = Status::Idle;
-        a.latest_id = a.latest_id.wrapping_add(1).max(1); // drop in-flight replies
-        show_list(false);
+        show_tips();
         return;
     }
     // Keep the previous results on screen until the new reply lands: no flicker.
@@ -656,10 +706,10 @@ unsafe fn on_reply(payload: &[u8]) {
 
 unsafe fn move_selection(delta: i32) {
     let a = app();
-    if a.items.is_empty() {
+    let n = row_count();
+    if n == 0 {
         return;
     }
-    let n = a.items.len() as i32;
     a.sel = (a.sel + delta).clamp(0, n - 1);
     if a.sel < a.scroll {
         a.scroll = a.sel;
@@ -674,6 +724,10 @@ unsafe fn move_selection(delta: i32) {
 
 unsafe fn open_item(index: i32, reveal: bool) {
     let a = app();
+    if a.status == Status::Tips {
+        apply_tip(index);
+        return;
+    }
     let Some(item) = a.items.get(index as usize) else {
         return;
     };
@@ -723,6 +777,9 @@ unsafe fn activate() {
     force_foreground(a.box_hwnd);
     SetFocus(a.edit);
     SendMessageW(a.edit, EM_SETSEL, 0, -1);
+    if GetWindowTextLengthW(a.edit) == 0 {
+        show_tips();
+    }
 }
 
 unsafe fn escape() {
@@ -1024,6 +1081,7 @@ unsafe fn render_and_quit() {
                 Status::Ready => "ready",
                 Status::NotRunning => "not-running",
                 Status::Idle => "idle",
+                Status::Tips => "tips",
             },
             a.items.len(),
             a.total
@@ -1108,7 +1166,7 @@ fn row_at(y: i32) -> i32 {
         return -1;
     }
     let i = a.scroll + r;
-    if (i as usize) < a.items.len() {
+    if i < row_count() {
         i
     } else {
         -1
@@ -1155,7 +1213,7 @@ unsafe extern "system" fn list_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xFFFF) as i16 as i32;
-            let max_scroll = (a.items.len() as i32 - VISIBLE_ROWS).max(0);
+            let max_scroll = (row_count() - VISIBLE_ROWS).max(0);
             a.scroll = (a.scroll - delta.signum() * 3).clamp(0, max_scroll);
             InvalidateRect(hwnd, null(), 0);
             0
@@ -1252,7 +1310,7 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
     let text_x = pad + scale(12) + icon + scale(12);
     let text_right = w - pad - scale(12);
 
-    if a.items.is_empty() {
+    if a.items.is_empty() && a.status != Status::Tips {
         let (title, sub) = match a.status {
             Status::NotRunning => ("Everything is not running", "Start Voidtools Everything, then keep typing."),
             _ => ("No results", "Everything found nothing for this search."),
@@ -1271,9 +1329,12 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
     let accent_brush = CreateSolidBrush(t.accent);
     let null_pen = GetStockObject(NULL_PEN);
     let old_pen = SelectObject(dc, null_pen);
+    let tips = a.status == Status::Tips;
     for r in 0..list_rows() {
         let i = a.scroll + r;
-        let Some(item) = a.items.get(i as usize) else { break };
+        if i >= row_count() {
+            break;
+        }
         let top = pad + r * row_h;
         let bottom = top + row_h;
         if i == a.sel || i == a.hover {
@@ -1287,14 +1348,33 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
             RoundRect(dc, pad + scale(2), top + scale(14), pad + scale(5), bottom - scale(14), scale(3), scale(3));
             SelectObject(dc, old_brush);
         }
+        let name_top = top + scale(5);
+        let name_bottom = top + row_h / 2 + scale(3);
+        if tips {
+            let (example, what) = TIPS[i as usize];
+            // Lightbulb glyph (Segoe MDL2 Assets) where file icons go.
+            SelectObject(dc, f.glyph);
+            SetTextColor(dc, t.accent);
+            let bulb: [u16; 1] = [0xE82F];
+            let mut gr = RECT { left: pad + scale(8), top, right: pad + scale(12) + icon + scale(4), bottom };
+            DrawTextW(dc, bulb.as_ptr() as _, 1, &mut gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(dc, f.name_bold);
+            SetTextColor(dc, t.text);
+            let mut er = RECT { left: text_x, top: name_top, right: text_right, bottom: name_bottom };
+            draw_text(dc, example, &mut er, DT_LEFT | DT_BOTTOM | DT_END_ELLIPSIS);
+            SelectObject(dc, f.small);
+            SetTextColor(dc, t.dim);
+            let mut dr = RECT { left: text_x, top: name_bottom + scale(1), right: text_right, bottom: bottom - scale(3) };
+            draw_text(dc, what, &mut dr, DT_LEFT | DT_TOP | DT_END_ELLIPSIS);
+            continue;
+        }
+        let item = &a.items[i as usize];
         if a.image_list != 0 || icon_index(item) >= 0 {
             let idx = icon_index(item);
             ImageList_Draw(a.image_list as _, idx, dc, pad + scale(12), top + (row_h - icon) / 2, ILD_TRANSPARENT);
         }
 
         // Name line, with Everything's match highlighting.
-        let name_top = top + scale(5);
-        let name_bottom = top + row_h / 2 + scale(3);
         let runs = highlight::segments(item.highlighted_name.as_deref().unwrap_or(&item.name));
         let mut x = text_x;
         for (run, hit) in runs {
@@ -1324,7 +1404,18 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
     SelectObject(dc, f.small);
     SetTextColor(dc, t.dim);
     let mut fr = RECT { left: pad + scale(12), top: h - scale(FOOTER_H), right: w - pad - scale(12), bottom: h - scale(4) };
-    draw_text(dc, "Enter open   Ctrl+Enter show in folder   Esc close", &mut fr, DT_LEFT | DT_VCENTER);
+    let truncated = a.status == Status::Ready && a.total as usize > a.items.len();
+    let hint = if tips {
+        "Search tips: Enter or click one to try it   Esc close"
+    } else if truncated {
+        // Too many matches to show: nudge toward narrowing instead of scrolling.
+        "Too many? Add a word, or narrow with ext:pdf or dm:thisweek"
+    } else {
+        "Enter open   Ctrl+Enter show in folder   Esc close"
+    };
+    // Leave room on the right for the result count.
+    let mut hr = RECT { right: if a.status == Status::Ready { fr.right - scale(130) } else { fr.right }, ..fr };
+    draw_text(dc, hint, &mut hr, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
     if a.status == Status::Ready {
         let counts = if a.total as usize > a.items.len() {
             format!("{} of {} results", group_digits(a.items.len() as u32), group_digits(a.total))

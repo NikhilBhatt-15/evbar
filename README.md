@@ -7,6 +7,7 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 
 ![evbar, dark theme](docs/screenshot-dark.png)
 ![evbar, light theme](docs/screenshot-light.png)
+![Search tips in the empty box](docs/screenshot-tips.png)
 
 ## Features
 
@@ -18,6 +19,9 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 - **Native Win32 UI.** Rounded corners (DWM on Windows 11, a window region on Windows 10), a
   double-buffered dropdown, Everything's match highlighting, shell icons by file type, light and dark
   themes that follow the system, and PerMonitorV2 DPI awareness.
+- **Teaches the search syntax.** Open the box with nothing typed and it lists Everything's search tricks
+  (`ext:`, `dm:today`, `size:>500mb`, path terms, OR/NOT, exact phrases). Pick one and it's typed in and run.
+  When a search matches more than fits, the footer suggests how to narrow it.
 - **Out of sight until you need it.** `Win+Alt+Space` (configurable) pops the box up above the tray.
   `Esc`, opening a result, clicking elsewhere, or the hotkey again puts it away.
 - **Or pinned.** With `--pinned` it stays on screen above the tray and hides only while a fullscreen
