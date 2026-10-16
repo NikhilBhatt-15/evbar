@@ -18,17 +18,19 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 - **Native Win32 UI.** Rounded corners (DWM on Windows 11, a window region on Windows 10), a
   double-buffered dropdown, Everything's match highlighting, shell icons by file type, light and dark
   themes that follow the system, and PerMonitorV2 DPI awareness.
-- **Keyboard first.** `Win+Alt+Space` (configurable) focuses the box from anywhere.
-- **Stays out of the way.** Hides while a fullscreen app is in front, like the taskbar does.
+- **Out of sight until you need it.** `Win+Alt+Space` (configurable) pops the box up above the tray.
+  `Esc`, opening a result, clicking elsewhere, or the hotkey again puts it away.
+- **Or pinned.** With `--pinned` it stays on screen above the tray and hides only while a fullscreen
+  app is in front, like the taskbar does.
 - Works with Everything 1.4, and with Everything 1.5 alpha (instance `1.5a`).
 
 | Key | Action |
 | --- | --- |
-| `Win+Alt+Space` | Focus the search box (change it with `--hotkey`) |
+| `Win+Alt+Space` | Show or hide the search box (change it with `--hotkey`) |
 | `Up` / `Down`, `PgUp` / `PgDn` | Move the selection |
 | `Enter` | Open the selected item |
 | `Ctrl+Enter` | Show it in Explorer |
-| `Esc` | Close results, then clear the text, then return focus to the taskbar |
+| `Esc` | Hide the box (pinned mode: close results, then clear the text, then return focus to the taskbar) |
 | `Ctrl+Backspace` | Delete the previous word |
 | Right-click the box | Exit |
 
@@ -37,11 +39,16 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 1. Install and run [Everything](https://www.voidtools.com/). evbar only queries it.
 2. Download `evbar.exe` from the [latest release](https://github.com/NikhilBhatt-15/evbar/releases/latest)
    and run it. Check the SHA-256 against the release notes if you like.
-3. To start evbar at sign-in, put a shortcut to it in `shell:startup`.
+3. To start evbar at sign-in, put a shortcut to `evbar.exe --hidden` in `shell:startup`.
+
+Run normally, evbar pops up once so you can see it started. With `--hidden` it starts silently and
+waits for the hotkey.
 
 Options:
 
 ```text
+evbar.exe --hidden            start without popping up (for autostart)
+evbar.exe --pinned            keep the box on screen above the tray instead of hiding it
 evbar.exe --hotkey <combo>    global hotkey, e.g. Ctrl+Shift+Space, Win+Shift+F, Alt+F12 (default Win+Alt+Space)
 evbar.exe --instance <name>   target a named Everything instance (default: the 1.4 instance, then "1.5a")
 evbar.exe --theme light|dark  override the system theme

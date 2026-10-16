@@ -178,6 +178,9 @@ struct App {
     render: Option<RenderJob>,
     /// The hotkey as typed, e.g. "Win+Alt+Space", or None if none is active.
     hotkey: Option<String>,
+    /// `--pinned`: always visible above the tray. Otherwise a launcher that
+    /// shows on the hotkey and hides on Esc, open, or click-away.
+    pinned: bool,
 }
 
 /// `--render <query> <out.bmp>`: run one real query with the windows hidden,
@@ -192,6 +195,8 @@ struct Options {
     force_light: Option<bool>,
     render: Option<RenderJob>,
     hotkey: String,
+    pinned: bool,
+    start_hidden: bool,
 }
 
 thread_local! {
@@ -238,6 +243,8 @@ fn parse_args() -> Options {
         instance: value("--instance", 1),
         force_light: value("--theme", 1).map(|t| t == "light"),
         hotkey: value("--hotkey", 1).unwrap_or_else(|| hotkey::DEFAULT.to_string()),
+        pinned: args.iter().any(|a| a == "--pinned"),
+        start_hidden: args.iter().any(|a| a == "--hidden"),
         render: value("--render", 1)
             .zip(value("--render", 2))
             .map(|(query, out)| RenderJob { query, out }),
@@ -274,6 +281,7 @@ unsafe fn run(opts: Options) {
         force_light: opts.force_light,
         render: opts.render,
         hotkey: None,
+        pinned: opts.pinned,
     });
     APP.with(|a| a.set(Box::into_raw(state)));
     let a = app();
@@ -357,7 +365,7 @@ unsafe fn run(opts: Options) {
         // Windows stay hidden; the query goes through the real IPC path.
         SetTimer(a.box_hwnd, RENDER_TIMEOUT_TIMER, 4000, None);
         SetWindowTextW(a.edit, wide(&job.query).as_ptr());
-    } else {
+    } else if a.pinned {
         register_hotkey(&opts.hotkey);
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -371,6 +379,13 @@ unsafe fn run(opts: Options) {
         ShowWindow(a.box_hwnd, SW_SHOWNOACTIVATE);
         // The hook only reports changes; check what is in front right now.
         on_foreground_changed(null_mut(), EVENT_SYSTEM_FOREGROUND, GetForegroundWindow(), 0, 0, 0, 0);
+    } else {
+        // Launcher mode: hidden until the hotkey. Pop up once on a manual
+        // launch so it is obvious evbar started; --hidden (for autostart) skips that.
+        register_hotkey(&opts.hotkey);
+        if !opts.start_hidden {
+            activate();
+        }
     }
 
     let mut msg: MSG = zeroed();
@@ -670,7 +685,16 @@ unsafe fn open_item(index: i32, reveal: bool) {
         let dir = wide(&item.path);
         ShellExecuteW(null_mut(), null(), wide(&full).as_ptr(), null(), dir.as_ptr(), SW_SHOWNORMAL);
     }
+    dismiss();
+}
+
+/// Closes the dropdown, and in launcher mode the box too.
+unsafe fn dismiss() {
+    let a = app();
     show_list(false);
+    if !a.pinned {
+        ShowWindow(a.box_hwnd, SW_HIDE);
+    }
 }
 
 /// Like EverythingToolbar's ForciblySetForegroundWindow: try the polite way,
@@ -692,6 +716,9 @@ unsafe fn force_foreground(hwnd: HWND) {
 unsafe fn activate() {
     let a = app();
     a.hidden_for_fullscreen = false;
+    if !a.pinned {
+        place_windows(); // the taskbar or DPI may have changed while hidden
+    }
     ShowWindow(a.box_hwnd, SW_SHOW);
     force_foreground(a.box_hwnd);
     SetFocus(a.edit);
@@ -700,6 +727,11 @@ unsafe fn activate() {
 
 unsafe fn escape() {
     let a = app();
+    if !a.pinned {
+        // Launcher mode: Esc puts it away. The text stays, selected, for next time.
+        dismiss();
+        return;
+    }
     if IsWindowVisible(a.list) != 0 {
         show_list(false);
     } else if GetWindowTextLengthW(a.edit) > 0 {
@@ -824,13 +856,18 @@ unsafe extern "system" fn box_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_HOTKEY => {
             if wparam as i32 == HOTKEY_ID {
-                activate();
+                // In launcher mode the hotkey toggles.
+                if !a.pinned && IsWindowVisible(hwnd) != 0 && GetForegroundWindow() == hwnd {
+                    dismiss();
+                } else {
+                    activate();
+                }
             }
             0
         }
         WM_ACTIVATE => {
             if (wparam & 0xFFFF) as u32 == WA_INACTIVE {
-                show_list(false);
+                dismiss(); // clicked away
             } else {
                 SetFocus(a.edit);
             }
