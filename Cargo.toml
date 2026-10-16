@@ -1,6 +1,6 @@
 [package]
 name = "evbar"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A compact search box above the Windows taskbar tray that queries Voidtools Everything directly over its WM_COPYDATA IPC."
 license = "MIT"

@@ -18,13 +18,13 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 - **Native Win32 UI.** Rounded corners (DWM on Windows 11, a window region on Windows 10), a
   double-buffered dropdown, Everything's match highlighting, shell icons by file type, light and dark
   themes that follow the system, and PerMonitorV2 DPI awareness.
-- **Keyboard first.** `Ctrl+Alt+Space` focuses the box from anywhere.
+- **Keyboard first.** `Win+Alt+Space` (configurable) focuses the box from anywhere.
 - **Stays out of the way.** Hides while a fullscreen app is in front, like the taskbar does.
 - Works with Everything 1.4, and with Everything 1.5 alpha (instance `1.5a`).
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+Alt+Space` | Focus the search box |
+| `Win+Alt+Space` | Focus the search box (change it with `--hotkey`) |
 | `Up` / `Down`, `PgUp` / `PgDn` | Move the selection |
 | `Enter` | Open the selected item |
 | `Ctrl+Enter` | Show it in Explorer |
@@ -42,9 +42,16 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 Options:
 
 ```text
+evbar.exe --hotkey <combo>    global hotkey, e.g. Ctrl+Shift+Space, Win+Shift+F, Alt+F12 (default Win+Alt+Space)
 evbar.exe --instance <name>   target a named Everything instance (default: the 1.4 instance, then "1.5a")
 evbar.exe --theme light|dark  override the system theme
 ```
+
+Global hotkeys go to whichever app registers them first. If another app already owns your combo, evbar
+says so at startup, so pick another one. For example, the Claude desktop app uses `Ctrl+Alt+Space`.
+Combos are built from `Ctrl`, `Alt`, `Shift`, `Win` plus a letter, a digit, `F1`–`F24`, `Space`, or a
+few named keys. To keep a custom hotkey, put it in the shortcut's target, e.g.
+`"C:\Tools\evbar.exe" --hotkey Ctrl+Shift+Space`.
 
 Running `evbar.exe` again while it's already running focuses the running copy.
 

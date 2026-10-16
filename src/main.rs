@@ -21,7 +21,7 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex};
 
 use evbar::ipc::{self, request, Item, Query};
-use evbar::{highlight, wide};
+use evbar::{highlight, hotkey, wide};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -176,6 +176,8 @@ struct App {
     hidden_for_fullscreen: bool,
     force_light: Option<bool>,
     render: Option<RenderJob>,
+    /// The hotkey as typed, e.g. "Win+Alt+Space", or None if none is active.
+    hotkey: Option<String>,
 }
 
 /// `--render <query> <out.bmp>`: run one real query with the windows hidden,
@@ -189,6 +191,7 @@ struct Options {
     instance: Option<String>,
     force_light: Option<bool>,
     render: Option<RenderJob>,
+    hotkey: String,
 }
 
 thread_local! {
@@ -234,6 +237,7 @@ fn parse_args() -> Options {
     Options {
         instance: value("--instance", 1),
         force_light: value("--theme", 1).map(|t| t == "light"),
+        hotkey: value("--hotkey", 1).unwrap_or_else(|| hotkey::DEFAULT.to_string()),
         render: value("--render", 1)
             .zip(value("--render", 2))
             .map(|(query, out)| RenderJob { query, out }),
@@ -269,6 +273,7 @@ unsafe fn run(opts: Options) {
         hidden_for_fullscreen: false,
         force_light: opts.force_light,
         render: opts.render,
+        hotkey: None,
     });
     APP.with(|a| a.set(Box::into_raw(state)));
     let a = app();
@@ -353,7 +358,7 @@ unsafe fn run(opts: Options) {
         SetTimer(a.box_hwnd, RENDER_TIMEOUT_TIMER, 4000, None);
         SetWindowTextW(a.edit, wide(&job.query).as_ptr());
     } else {
-        RegisterHotKey(a.box_hwnd, HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE as u32);
+        register_hotkey(&opts.hotkey);
         SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
             EVENT_SYSTEM_FOREGROUND,
@@ -372,6 +377,30 @@ unsafe fn run(opts: Options) {
     while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+}
+
+/// Registers the global hotkey. Another app may already own the combination
+/// (RegisterHotKey is first come, first served), so say so instead of
+/// failing silently.
+unsafe fn register_hotkey(spec: &str) {
+    let a = app();
+    let problem = match hotkey::parse(spec) {
+        Err(e) => Some(format!("The hotkey {e}.")),
+        Ok(hk) => {
+            if RegisterHotKey(a.box_hwnd, HOTKEY_ID, hk.modifiers | MOD_NOREPEAT, hk.vk) != 0 {
+                a.hotkey = Some(spec.to_string());
+                None
+            } else {
+                Some(format!("{spec} is already used by another app, so evbar can't use it."))
+            }
+        }
+    };
+    if let Some(problem) = problem {
+        let text = format!(
+            "{problem}\n\nClick the search box to use evbar, or restart it with a different hotkey, e.g.\n\n    evbar.exe --hotkey Ctrl+Shift+Space"
+        );
+        MessageBoxW(a.box_hwnd, wide(&text).as_ptr(), wide("evbar").as_ptr(), MB_OK | MB_ICONWARNING);
     }
 }
 
@@ -813,7 +842,11 @@ unsafe extern "system" fn box_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_CONTEXTMENU | WM_RBUTTONUP => {
             let menu = CreatePopupMenu();
-            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide("Ctrl+Alt+Space to focus").as_ptr());
+            let label = match &a.hotkey {
+                Some(h) => format!("{h} to focus"),
+                None => "No hotkey (see --hotkey)".to_string(),
+            };
+            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide(&label).as_ptr());
             AppendMenuW(menu, MF_SEPARATOR, 0, null());
             AppendMenuW(menu, MF_STRING, ID_MENU_EXIT, wide("Exit evbar").as_ptr());
             let mut pt: POINT = zeroed();

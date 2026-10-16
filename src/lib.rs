@@ -2,6 +2,7 @@
 //! in-process mock of the Everything IPC window used by tests and examples.
 
 pub mod highlight;
+pub mod hotkey;
 pub mod ipc;
 pub mod mock;
 
