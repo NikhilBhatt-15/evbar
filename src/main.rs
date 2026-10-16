@@ -142,7 +142,8 @@ fn system_uses_light_theme() -> bool {
 
 /// The single-slot mailbox between the UI thread and the IPC worker.
 struct Worker {
-    slot: Mutex<Option<(u32, String)>>,
+    /// (reply id, query text, offset of the first result wanted)
+    slot: Mutex<Option<(u32, String, u32)>>,
     wake: Condvar,
 }
 
@@ -208,6 +209,10 @@ struct App {
     pinned: bool,
     /// Folder the search is limited to, shown as a chip in the box.
     scope: Option<String>,
+    /// Exact text of the last query sent, for fetching further pages.
+    query_text: String,
+    /// A "Show more" page request is in flight.
+    loading_more: bool,
 }
 
 /// `--render <query> <out.bmp>`: run one real query with the windows hidden,
@@ -215,6 +220,10 @@ struct App {
 struct RenderJob {
     query: String,
     out: String,
+    /// `--render-more 0`: scroll to the "Show more" row and render it
+    /// selected. `--render-more 1`: also press it and render after the next
+    /// page has been appended.
+    more: Option<bool>,
 }
 
 struct Options {
@@ -295,7 +304,11 @@ fn parse_args() -> Options {
             .filter(|s| !s.is_empty()),
         render: value("--render", 1)
             .zip(value("--render", 2))
-            .map(|(query, out)| RenderJob { query, out }),
+            .map(|(query, out)| RenderJob {
+                query,
+                out,
+                more: value("--render-more", 1).map(|v| v == "1"),
+            }),
     }
 }
 
@@ -331,6 +344,8 @@ unsafe fn run(opts: Options) {
         hotkey: None,
         pinned: opts.pinned,
         scope: opts.scope.clone(),
+        query_text: String::new(),
+        loading_more: false,
     });
     APP.with(|a| a.set(Box::into_raw(state)));
     let a = app();
@@ -480,7 +495,7 @@ unsafe fn register_hotkey(spec: &str) {
 /// in the slot and never sent.
 fn ipc_worker(worker: Arc<Worker>, reply_hwnd: usize, instance: Option<String>) {
     loop {
-        let (id, text) = {
+        let (id, text, offset) = {
             let mut slot = worker.slot.lock().unwrap();
             while slot.is_none() {
                 slot = worker.wake.wait(slot).unwrap();
@@ -488,6 +503,7 @@ fn ipc_worker(worker: Arc<Worker>, reply_hwnd: usize, instance: Option<String>) 
             slot.take().unwrap()
         };
         let mut q = Query::new(text);
+        q.offset = offset;
         q.max_results = MAX_RESULTS;
         q.request_flags = REQUEST_FLAGS;
         unsafe {
@@ -501,10 +517,35 @@ fn ipc_worker(worker: Arc<Worker>, reply_hwnd: usize, instance: Option<String>) 
 }
 
 fn submit_query(text: String) {
+    app().loading_more = false;
+    send_page(text, 0);
+}
+
+fn send_page(text: String, offset: u32) {
     let a = app();
     a.latest_id = a.latest_id.wrapping_add(1).max(1);
-    *a.worker.slot.lock().unwrap() = Some((a.latest_id, text));
+    a.query_text = text.clone();
+    *a.worker.slot.lock().unwrap() = Some((a.latest_id, text, offset));
     a.worker.wake.notify_one();
+}
+
+/// True when Everything matched more than the list holds, so the
+/// "Show more" row is offered after the last result.
+fn has_more() -> bool {
+    let a = app();
+    a.status == Status::Ready && (a.total as usize) > a.items.len()
+}
+
+/// Asks Everything for the next page of the same search; the reply is
+/// appended in `on_reply`.
+unsafe fn load_more() {
+    let a = app();
+    if !has_more() || a.loading_more {
+        return;
+    }
+    a.loading_more = true;
+    InvalidateRect(a.list, null(), 0);
+    send_page(a.query_text.clone(), a.items.len() as u32);
 }
 
 unsafe fn style_frame(hwnd: HWND) {
@@ -645,7 +686,7 @@ fn row_count() -> i32 {
     if a.status == Status::Tips {
         TIPS.len() as i32
     } else {
-        a.items.len() as i32
+        a.items.len() as i32 + has_more() as i32
     }
 }
 
@@ -735,11 +776,35 @@ unsafe fn on_reply(payload: &[u8]) {
         return;
     };
     a.total = list.total;
-    a.items = list.items;
     a.status = Status::Ready;
+    if list.offset > 0 && list.offset as usize == a.items.len() {
+        // Next page: append and keep the selection and scroll where they
+        // are. The selection was on the "Show more" row, so it now lands
+        // on the first new result.
+        a.items.extend(list.items);
+        a.loading_more = false;
+        if !a.items.is_empty() {
+            a.sel = a.sel.min(a.items.len() as i32 - 1);
+        }
+        InvalidateRect(a.list, null(), 0);
+        if a.render.is_some() {
+            render_and_quit();
+        }
+        return;
+    }
+    a.items = list.items;
+    a.loading_more = false;
     a.sel = 0;
     a.scroll = 0;
     a.hover = -1;
+    if let Some(press) = a.render.as_ref().and_then(|j| j.more) {
+        // Self-test: go to the "Show more" row, optionally press it.
+        move_selection(row_count());
+        if press && has_more() {
+            open_item(a.sel, false);
+            return; // renders once the appended page arrives
+        }
+    }
     if a.render.is_some() {
         render_and_quit();
     } else if GetForegroundWindow() == a.box_hwnd {
@@ -769,6 +834,10 @@ unsafe fn open_item(index: i32, reveal: bool) {
     let a = app();
     if a.status == Status::Tips {
         apply_tip(index);
+        return;
+    }
+    if index as usize == a.items.len() && has_more() {
+        load_more();
         return;
     }
     let Some(item) = a.items.get(index as usize) else {
@@ -1475,6 +1544,36 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
         }
         let name_top = top + scale(5);
         let name_bottom = top + row_h / 2 + scale(3);
+        if !tips && i as usize == a.items.len() {
+            // "Show more": a small pill button centred in the last row.
+            let remaining = a.total as usize - a.items.len();
+            let label = if a.loading_more {
+                "Loading…".to_string()
+            } else {
+                format!("Show {} more   ·   {} not shown", remaining.min(MAX_RESULTS as usize), group_digits(remaining as u32))
+            };
+            SelectObject(dc, f.small);
+            let wl: Vec<u16> = label.encode_utf16().collect();
+            let pill_w = text_width(dc, &wl) + scale(44);
+            let pill_h = scale(26);
+            let px = (w - pill_w) / 2;
+            let py = top + (row_h - pill_h) / 2;
+            let pill = CreateSolidBrush(if i == a.sel || i == a.hover { t.bg } else { t.sel });
+            let old_brush = SelectObject(dc, pill);
+            RoundRect(dc, px, py, px + pill_w, py + pill_h, pill_h, pill_h);
+            SelectObject(dc, old_brush);
+            DeleteObject(pill);
+            SelectObject(dc, f.glyph);
+            SetTextColor(dc, t.accent);
+            let chevron: [u16; 1] = [0xE70D]; // ChevronDown in Segoe MDL2 Assets
+            let mut cr = RECT { left: px + scale(10), top: py, right: px + scale(28), bottom: py + pill_h };
+            DrawTextW(dc, chevron.as_ptr() as _, 1, &mut cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(dc, f.small);
+            SetTextColor(dc, t.text);
+            let mut lr = RECT { left: px + scale(32), top: py, right: px + pill_w - scale(10), bottom: py + pill_h };
+            draw_text(dc, &label, &mut lr, DT_LEFT | DT_VCENTER);
+            continue;
+        }
         if tips {
             let (example, what) = TIPS[i as usize];
             // Lightbulb glyph (Segoe MDL2 Assets) where file icons go.

@@ -23,6 +23,8 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 - **Teaches the search syntax.** Open the box with nothing typed and it lists Everything's search tricks
   (`ext:`, `dm:today`, `size:>500mb`, path terms, OR/NOT, exact phrases). Pick one and it's typed in and run.
   When a search matches more than fits, the footer suggests how to narrow it.
+- **100 at a time, more on request.** Results come 100 at a time. When there are more, a small
+  **Show 100 more** button at the end of the list fetches the next page from Everything and appends it.
 - **Search inside one folder.** Press the hotkey while a File Explorer window is in front and the search
   is limited to the folder it shows (the active tab on Windows 11). A chip in the box shows the folder;
   Backspace at the start of the box removes it. Or right-click a folder, a drive, or the empty space inside
