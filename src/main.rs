@@ -13,6 +13,8 @@
 
 #![windows_subsystem = "windows"]
 
+mod context_menu;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -21,7 +23,7 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex};
 
 use evbar::ipc::{self, request, Item, Query};
-use evbar::{highlight, hotkey, wide};
+use evbar::{highlight, hotkey, scope, wide};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE};
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -62,6 +64,9 @@ const ROW_H: i32 = 46;
 const PAD: i32 = 6;
 const FOOTER_H: i32 = 28;
 const GAP: i32 = 8;
+const CHIP_X: i32 = 38;
+const CHIP_H: i32 = 24;
+const CHIP_MAX_W: i32 = 150;
 
 const EM_SETSEL: u32 = 0x00B1;
 const EM_GETSEL: u32 = 0x00B0;
@@ -74,6 +79,9 @@ const DWMWCP_ROUND: i32 = 2;
 const MA_NOACTIVATE_: isize = 3;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const RENDER_TIMEOUT_TIMER: usize = 1;
+/// `COPYDATASTRUCT.dwData` from a second evbar launch carrying a folder to
+/// open scoped to. Far above any query reply id.
+const COPYDATA_OPEN_SCOPED: usize = 0xEB5C_0001;
 
 fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
     r as u32 | (g as u32) << 8 | (b as u32) << 16
@@ -198,6 +206,8 @@ struct App {
     /// `--pinned`: always visible above the tray. Otherwise a launcher that
     /// shows on the hotkey and hides on Esc, open, or click-away.
     pinned: bool,
+    /// Folder the search is limited to, shown as a chip in the box.
+    scope: Option<String>,
 }
 
 /// `--render <query> <out.bmp>`: run one real query with the windows hidden,
@@ -214,6 +224,8 @@ struct Options {
     hotkey: String,
     pinned: bool,
     start_hidden: bool,
+    /// `--scope <folder>`: open limited to this folder (Explorer's context menu).
+    scope: Option<String>,
 }
 
 thread_local! {
@@ -230,17 +242,33 @@ fn scale(v: i32) -> i32 {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--install-menu") {
+        return context_menu::install();
+    }
+    if args.iter().any(|a| a == "--uninstall-menu") {
+        return context_menu::uninstall();
+    }
     let opts = parse_args();
     unsafe {
         let mutex_name = wide(MUTEX_NAME);
         CreateMutexW(null(), 0, mutex_name.as_ptr());
         if GetLastError() == ERROR_ALREADY_EXISTS && opts.render.is_none() {
-            // Second launch: hand focus to the running instance.
+            // Second launch: hand focus (and a folder scope, if any) to the
+            // running instance.
             let class = wide(BOX_CLASS);
             let existing = FindWindowW(class.as_ptr(), null());
             if !existing.is_null() {
                 AllowSetForegroundWindow(ASFW_ANY);
-                PostMessageW(existing, WM_HOTKEY, HOTKEY_ID as usize, 0);
+                match &opts.scope {
+                    Some(folder) => {
+                        let payload: Vec<u8> = folder.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                        ipc::send_copydata(existing, null_mut(), COPYDATA_OPEN_SCOPED, &payload, 2000);
+                    }
+                    None => {
+                        PostMessageW(existing, WM_HOTKEY, HOTKEY_ID as usize, 0);
+                    }
+                }
             }
             return;
         }
@@ -262,6 +290,9 @@ fn parse_args() -> Options {
         hotkey: value("--hotkey", 1).unwrap_or_else(|| hotkey::DEFAULT.to_string()),
         pinned: args.iter().any(|a| a == "--pinned"),
         start_hidden: args.iter().any(|a| a == "--hidden"),
+        scope: value("--scope", 1)
+            .map(|s| context_menu::clean_scope_arg(&s))
+            .filter(|s| !s.is_empty()),
         render: value("--render", 1)
             .zip(value("--render", 2))
             .map(|(query, out)| RenderJob { query, out }),
@@ -299,6 +330,7 @@ unsafe fn run(opts: Options) {
         render: opts.render,
         hotkey: None,
         pinned: opts.pinned,
+        scope: opts.scope.clone(),
     });
     APP.with(|a| a.set(Box::into_raw(state)));
     let a = app();
@@ -401,11 +433,14 @@ unsafe fn run(opts: Options) {
         ShowWindow(a.box_hwnd, SW_SHOWNOACTIVATE);
         // The hook only reports changes; check what is in front right now.
         on_foreground_changed(null_mut(), EVENT_SYSTEM_FOREGROUND, GetForegroundWindow(), 0, 0, 0, 0);
+        if opts.scope.is_some() {
+            activate();
+        }
     } else {
         // Launcher mode: hidden until the hotkey. Pop up once on a manual
         // launch so it is obvious evbar started; --hidden (for autostart) skips that.
         register_hotkey(&opts.hotkey);
-        if !opts.start_hidden {
+        if !opts.start_hidden || opts.scope.is_some() {
             activate();
         }
     }
@@ -556,7 +591,10 @@ unsafe fn place_windows() {
         rebuild_fonts();
     }
 
-    let (w, h, gap) = (scale(BOX_W), scale(BOX_H), scale(GAP));
+    // A folder scope adds a chip; the box grows to keep the typing area.
+    let chip = chip_width();
+    let chip_room = if chip > 0 { chip + scale(6) } else { 0 };
+    let (w, h, gap) = (scale(BOX_W) + chip_room, scale(BOX_H), scale(GAP));
     // Right edge of the notification area, if Explorer exposes it.
     let tray_right = {
         let tray = FindWindowExW(
@@ -583,6 +621,8 @@ unsafe fn place_windows() {
         }
     };
     SetWindowPos(a.box_hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+    style_frame(a.box_hwnd); // the Windows 10 rounded region depends on the size
+    InvalidateRect(a.box_hwnd, null(), 1);
 
     let mut tm: TEXTMETRICW = zeroed();
     let dc = GetDC(a.edit);
@@ -591,7 +631,7 @@ unsafe fn place_windows() {
     SelectObject(dc, old);
     ReleaseDC(a.edit, dc);
     let eh = tm.tmHeight + scale(2);
-    let left = scale(38);
+    let left = scale(CHIP_X) + chip_room;
     SetWindowPos(a.edit, null_mut(), left, (h - eh) / 2, w - left - scale(12), eh, SWP_NOZORDER | SWP_NOACTIVATE);
     SendMessageW(a.edit, EM_SETMARGINS, 3, 0);
     if IsWindowVisible(a.list) != 0 {
@@ -683,7 +723,10 @@ unsafe fn on_text_changed() {
         return;
     }
     // Keep the previous results on screen until the new reply lands: no flicker.
-    submit_query(text);
+    match &app().scope {
+        Some(folder) => submit_query(scope::scoped_query(folder, &text)),
+        None => submit_query(text),
+    }
 }
 
 unsafe fn on_reply(payload: &[u8]) {
@@ -864,6 +907,15 @@ unsafe extern "system" fn edit_proc(
         }
         WM_CHAR => match wparam {
             0x0D | 0x1B => return 0, // no beep for Enter / Escape
+            0x08 if app().scope.is_some() => {
+                // Backspace with the caret at the very start removes the folder chip.
+                let (mut start, mut end) = (0u32, 0u32);
+                SendMessageW(hwnd, EM_GETSEL, &mut start as *mut u32 as usize, &mut end as *mut u32 as isize);
+                if start == 0 && end == 0 {
+                    set_scope(None);
+                    return 0;
+                }
+            }
             0x7F => {
                 delete_word_back(hwnd);
                 return 0;
@@ -879,6 +931,14 @@ unsafe extern "system" fn box_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     let a = app();
     match msg {
         ipc::WM_COPYDATA => {
+            // A second launch with --scope (Explorer's "Search here with evbar").
+            if let Some(payload) = ipc::reply_payload(msg, lparam, COPYDATA_OPEN_SCOPED as u32) {
+                let units: Vec<u16> = payload.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let folder = String::from_utf16_lossy(&units);
+                set_scope((!folder.is_empty()).then_some(folder));
+                activate();
+                return 1;
+            }
             // Only the newest query's reply is accepted; older ones are stale.
             if let Some(payload) = ipc::reply_payload(msg, lparam, a.latest_id) {
                 on_reply(payload);
@@ -917,6 +977,8 @@ unsafe extern "system" fn box_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 if !a.pinned && IsWindowVisible(hwnd) != 0 && GetForegroundWindow() == hwnd {
                     dismiss();
                 } else {
+                    // Pressed over an Explorer window: search in its folder.
+                    set_scope(scope_from_foreground());
                     activate();
                 }
             }
@@ -1013,7 +1075,65 @@ unsafe fn paint_box(hwnd: HWND, dc: HDC) {
         };
         let glyph: [u16; 1] = [0xE721]; // magnifier in Segoe MDL2 Assets
         DrawTextW(dc, glyph.as_ptr() as _, 1, &mut g, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        if let Some(folder) = &a.scope {
+            // Folder chip: [folder glyph  Name]
+            let cw = chip_width();
+            let (ch, x) = (scale(CHIP_H), scale(CHIP_X));
+            let top = (rc.bottom - ch) / 2;
+            let brush = CreateSolidBrush(a.theme.sel);
+            let old_brush = SelectObject(dc, brush);
+            let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+            RoundRect(dc, x, top, x + cw, top + ch, scale(8), scale(8));
+            SelectObject(dc, old_pen);
+            SelectObject(dc, old_brush);
+            DeleteObject(brush);
+            // The shell's own folder icon, as in the result rows.
+            let probe = Item { flags: ipc::ITEM_FOLDER, ..Default::default() };
+            let idx = icon_index(&probe);
+            let icon = GetSystemMetrics(SM_CXSMICON);
+            if a.image_list != 0 {
+                ImageList_Draw(a.image_list as _, idx, dc, x + scale(7), top + (ch - icon) / 2, ILD_TRANSPARENT);
+            }
+            SelectObject(dc, f.small);
+            SetTextColor(dc, a.theme.text);
+            let mut tr = RECT { left: x + scale(12) + icon, top, right: x + cw - scale(8), bottom: top + ch };
+            draw_text(dc, &scope::label(folder), &mut tr, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+        }
     }
+}
+
+/// Width of the folder chip, or 0 without a scope.
+unsafe fn chip_width() -> i32 {
+    let a = app();
+    let (Some(folder), Some(f)) = (&a.scope, &a.fonts) else { return 0 };
+    let dc = GetDC(null_mut());
+    let old = SelectObject(dc, f.small);
+    let label: Vec<u16> = scope::label(folder).encode_utf16().collect();
+    let text = text_width(dc, &label);
+    SelectObject(dc, old);
+    ReleaseDC(null_mut(), dc);
+    (text + GetSystemMetrics(SM_CXSMICON) + scale(20)).min(scale(CHIP_MAX_W))
+}
+
+/// Changes the folder scope, relays out the box, and reruns the search.
+unsafe fn set_scope(folder: Option<String>) {
+    let a = app();
+    if a.scope == folder {
+        return;
+    }
+    a.scope = folder;
+    place_windows();
+    on_text_changed();
+}
+
+/// The hotkey's scope: the folder of the Explorer window in front, if any.
+unsafe fn scope_from_foreground() -> Option<String> {
+    let fg = GetForegroundWindow();
+    if fg.is_null() || fg == app().box_hwnd {
+        return app().scope.clone();
+    }
+    evbar::explorer::folder_of(fg as isize)
 }
 
 /// Paints the hidden box and dropdown into one offscreen bitmap, with the
@@ -1284,8 +1404,13 @@ fn group_digits(n: u32) -> String {
 }
 
 unsafe fn draw_text(dc: HDC, s: &str, rc: &mut RECT, flags: u32) {
-    let w: Vec<u16> = s.encode_utf16().collect();
-    DrawTextW(dc, w.as_ptr() as _, w.len() as i32, rc, flags | DT_SINGLELINE | DT_NOPREFIX);
+    // An empty Vec's pointer is a dangling placeholder, and DrawTextW with
+    // ellipsis flags reads it even for a zero count. Draw nothing instead.
+    if s.is_empty() {
+        return;
+    }
+    let w: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    DrawTextW(dc, w.as_ptr() as _, w.len() as i32 - 1, rc, flags | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 /// Double-buffered paint of the result rows and footer.
@@ -1405,7 +1530,21 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
     SetTextColor(dc, t.dim);
     let mut fr = RECT { left: pad + scale(12), top: h - scale(FOOTER_H), right: w - pad - scale(12), bottom: h - scale(4) };
     let truncated = a.status == Status::Ready && a.total as usize > a.items.len();
-    let hint = if tips {
+    let counts_room = if a.status == Status::Ready { scale(130) } else { 0 };
+    if let (Some(folder), false) = (&a.scope, truncated) {
+        // "In <folder, middle-elided>   Backspace: search everywhere"
+        let back = "Backspace: search everywhere";
+        let wback: Vec<u16> = back.encode_utf16().collect();
+        let back_w = text_width(dc, &wback);
+        let path_right = fr.right - counts_room - back_w - scale(16);
+        let mut pr = RECT { right: path_right, ..fr };
+        draw_text(dc, &format!("In {folder}"), &mut pr, DT_LEFT | DT_VCENTER | DT_PATH_ELLIPSIS);
+        let mut br = RECT { left: path_right + scale(16), right: fr.right - counts_room, ..fr };
+        draw_text(dc, back, &mut br, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+    let hint = if a.scope.is_some() && !truncated {
+        ""
+    } else if tips {
         "Search tips: Enter or click one to try it   Esc close"
     } else if truncated {
         // Too many matches to show: nudge toward narrowing instead of scrolling.
@@ -1414,7 +1553,7 @@ unsafe fn paint_list(hwnd: HWND, target: HDC) {
         "Enter open   Ctrl+Enter show in folder   Esc close"
     };
     // Leave room on the right for the result count.
-    let mut hr = RECT { right: if a.status == Status::Ready { fr.right - scale(130) } else { fr.right }, ..fr };
+    let mut hr = RECT { right: fr.right - counts_room, ..fr };
     draw_text(dc, hint, &mut hr, DT_LEFT | DT_VCENTER | DT_END_ELLIPSIS);
     if a.status == Status::Ready {
         let counts = if a.total as usize > a.items.len() {

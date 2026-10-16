@@ -1,10 +1,23 @@
 [package]
 name = "evbar"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "A compact search box above the Windows taskbar tray that queries Voidtools Everything directly over its WM_COPYDATA IPC."
 license = "MIT"
 repository = "https://github.com/NikhilBhatt-15/evbar"
+
+# COM, only for reading which folder an Explorer window shows (src/explorer.rs).
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]
 
 [dependencies.windows-sys]
 version = "0.59"

@@ -8,6 +8,7 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 ![evbar, dark theme](docs/screenshot-dark.png)
 ![evbar, light theme](docs/screenshot-light.png)
 ![Search tips in the empty box](docs/screenshot-tips.png)
+![Search limited to one folder](docs/screenshot-scope.png)
 
 ## Features
 
@@ -22,6 +23,11 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 - **Teaches the search syntax.** Open the box with nothing typed and it lists Everything's search tricks
   (`ext:`, `dm:today`, `size:>500mb`, path terms, OR/NOT, exact phrases). Pick one and it's typed in and run.
   When a search matches more than fits, the footer suggests how to narrow it.
+- **Search inside one folder.** Press the hotkey while a File Explorer window is in front and the search
+  is limited to the folder it shows (the active tab on Windows 11). A chip in the box shows the folder;
+  Backspace at the start of the box removes it. Or right-click a folder, a drive, or the empty space inside
+  a folder and choose **Search here with evbar** (on Windows 11, under *Show more options*). Without
+  either, type the path yourself: `downloads\ report`.
 - **Out of sight until you need it.** `Win+Alt+Space` (configurable) pops the box up above the tray.
   `Esc`, opening a result, clicking elsewhere, or the hotkey again puts it away.
 - **Or pinned.** With `--pinned` it stays on screen above the tray and hides only while a fullscreen
@@ -36,6 +42,7 @@ scan the disk, and has no runtime dependencies. It's one 190 KB executable.
 | `Ctrl+Enter` | Show it in Explorer |
 | `Esc` | Hide the box (pinned mode: close results, then clear the text, then return focus to the taskbar) |
 | `Ctrl+Backspace` | Delete the previous word |
+| `Backspace` at the start | Remove the folder scope and search everywhere |
 | Right-click the box | Exit |
 
 ## Install
@@ -52,6 +59,9 @@ Options:
 
 ```text
 evbar.exe --hidden            start without popping up (for autostart)
+evbar.exe --scope <folder>    open with the search limited to a folder
+evbar.exe --install-menu      add "Search here with evbar" to Explorer's right-click menu (current user)
+evbar.exe --uninstall-menu    remove it again
 evbar.exe --pinned            keep the box on screen above the tray instead of hiding it
 evbar.exe --hotkey <combo>    global hotkey, e.g. Ctrl+Shift+Space, Win+Shift+F, Alt+F12 (default Win+Alt+Space)
 evbar.exe --instance <name>   target a named Everything instance (default: the 1.4 instance, then "1.5a")
